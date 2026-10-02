@@ -88,12 +88,16 @@
   <button id="parentStop">Stop</button>
 </section>
 
+<p id="diag" style="position:fixed;left:0;right:0;bottom:max(4px,env(safe-area-inset-bottom));margin:0;text-align:center;font-size:12px;color:#666;pointer-events:none;z-index:4"></p>
 <div id="dim"><span>Tap anywhere to wake screen</span></div>
 
 <script src="peerjs.min.js"></script>
 <script>
 (() => {
+  const VERSION = 'v4';
   const PREFIX = 'sharka-babymon-';
+  let lastErr = '';
+  const noteErr = e => { lastErr = (e && (e.type || e.name)) || String(e); };
   const qs = new URLSearchParams(location.search);
   // Optional self-hosted signaling server: ?server=host:port (used for testing).
   const peerOpts = { debug: 1 };
@@ -207,7 +211,7 @@
       setTimeout(() => { if (babyPeer === peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 2000);
     });
     peer.on('error', err => {
-      console.warn('baby peer error', err.type, err);
+      console.warn('baby peer error', err.type, err); noteErr(err);
       if (err.type === 'peer-unavailable') return;
       if (babyPeer !== peer) return;
       // 'unavailable-id' happens right after a reload while the old session is still registered.
@@ -297,7 +301,7 @@
     });
     peer.on('disconnected', () => setTimeout(() => { if (parentPeer === peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 2000));
     peer.on('error', err => {
-      console.warn('parent peer error', err.type, err);
+      console.warn('parent peer error', err.type, err); noteErr(err);
       if (err.type === 'peer-unavailable') {
         setStatus($('parentStatus'), `Can't find the iPad (${parentCode}). Is its screen on, in Baby mode?`, 'bad');
         scheduleRetry(3000);
@@ -338,6 +342,7 @@
       if (Date.now() - lastPong > 15000) { parentConn.close(); parentCall?.close(); parentCall = null; lost(); }
     } else if (Date.now() - lastPong > 15000) {
       lastPong = Date.now();
+      setStatus($('parentStatus'), `Can't find the iPad (${parentCode}). Is its screen on, in Baby mode?`, 'bad');
       scheduleRetry(0);
     }
   }, 5000);
@@ -420,6 +425,12 @@
   };
   $('codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') $('watchBtn').click(); });
   $('parentStop').onclick = stopParent;
+
+  setInterval(() => {
+    const p = babyActive ? babyPeer : parentActive ? parentPeer : null;
+    const st = !p ? 'not started' : p.destroyed ? 'restarting' : p.disconnected ? 'offline' : p.open ? 'online' : 'connecting';
+    $('diag').textContent = (babyActive || parentActive) ? `${VERSION} · server ${st}${lastErr ? ' · last error: ' + lastErr : ''}` : VERSION;
+  }, 1000);
 
   // Reloading the baby device goes straight back to camera mode.
   if (qs.get('mode') === 'baby') {
