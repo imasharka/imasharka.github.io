@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#111">
+<title>Baby Monitor</title>
+<style>
+  :root { --bg:#111; --fg:#f5f5f5; --muted:#9a9a9a; --accent:#4f8cff; --ok:#3ecf7a; --warn:#f0b43c; --bad:#ff5a5a; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif; }
+  body { display:flex; flex-direction:column; }
+  .screen { display:none; flex:1; flex-direction:column; padding:16px; padding-top:max(16px,env(safe-area-inset-top)); gap:16px; }
+  .screen.on { display:flex; }
+  h1 { margin:8px 0 0; font-size:28px; text-align:center; }
+  p.hint { color:var(--muted); text-align:center; margin:0; font-size:16px; line-height:1.4; }
+  button { font:inherit; border:0; border-radius:18px; color:#fff; background:#2a2a2a; padding:18px; font-size:20px; font-weight:600; cursor:pointer; }
+  button.big { flex:1; min-height:140px; font-size:28px; }
+  button.primary { background:var(--accent); }
+  .home-buttons { flex:1; display:flex; flex-direction:column; gap:16px; max-width:520px; width:100%; margin:0 auto; }
+  .row { display:flex; gap:12px; }
+  .row > * { flex:1; }
+  .code { font-size:72px; font-weight:800; letter-spacing:10px; text-align:center; font-variant-numeric:tabular-nums; }
+  input.code-in { font:inherit; font-size:56px; font-weight:800; letter-spacing:10px; text-align:center; width:100%;
+    background:#222; color:#fff; border:2px solid #333; border-radius:18px; padding:12px; }
+  .status { text-align:center; font-size:18px; font-weight:600; padding:10px; border-radius:12px; background:#222; }
+  .status.ok { color:var(--ok); } .status.warn { color:var(--warn); } .status.bad { color:var(--bad); }
+  video { width:100%; flex:1; min-height:0; object-fit:contain; background:#000; border-radius:16px; }
+  #babyPreview { max-height:40vh; }
+  .meter { height:22px; background:#222; border-radius:11px; overflow:hidden; }
+  .meter > div { height:100%; width:0; background:var(--ok); transition:width .1s linear; }
+  .meter.loud > div { background:var(--bad); }
+  #dim { position:fixed; inset:0; background:#000; display:none; z-index:10; align-items:flex-end; justify-content:center; padding-bottom:40px; }
+  #dim.on { display:flex; }
+  #dim span { color:#333; font-size:16px; }
+  #tapAudio { position:fixed; inset:0; background:rgba(0,0,0,.75); display:none; z-index:5; align-items:center; justify-content:center; }
+  #tapAudio.on { display:flex; }
+  .viewer-wrap { position:relative; flex:1; display:flex; min-height:0; }
+</style>
+</head>
+<body>
+
+<!-- Home -->
+<section id="home" class="screen on">
+  <h1>Baby Monitor</h1>
+  <p class="hint">Both devices on the same Wi-Fi.</p>
+  <div class="home-buttons">
+    <button class="big primary" id="goBaby">👶 Baby<br><small style="font-weight:400;font-size:18px">this device stays with the kids</small></button>
+    <button class="big" id="goParent">👂 Parent<br><small style="font-weight:400;font-size:18px">watch and listen</small></button>
+  </div>
+</section>
+
+<!-- Baby (camera) -->
+<section id="baby" class="screen">
+  <p class="hint">On the parent phone, open this page, tap <b>Parent</b>, enter:</p>
+  <div class="code" id="babyCode">----</div>
+  <div class="status warn" id="babyStatus">Starting camera…</div>
+  <video id="babyPreview" autoplay playsinline muted></video>
+  <div class="row">
+    <button id="flipCam">🔄 Flip camera</button>
+    <button id="dimBtn" class="primary">🌙 Dark screen</button>
+  </div>
+  <button id="babyStop">Stop</button>
+</section>
+
+<!-- Parent (viewer) -->
+<section id="parentJoin" class="screen">
+  <h1>Enter the code</h1>
+  <p class="hint">It's shown on the baby device.</p>
+  <input class="code-in" id="codeIn" inputmode="numeric" pattern="[0-9]*" maxlength="4" autocomplete="off" placeholder="0000">
+  <button class="primary" id="watchBtn" style="min-height:90px;font-size:26px">▶︎ Watch &amp; listen</button>
+  <button id="parentBack">Back</button>
+</section>
+
+<section id="parent" class="screen">
+  <div class="status warn" id="parentStatus">Connecting…</div>
+  <div class="viewer-wrap">
+    <video id="remote" autoplay playsinline></video>
+    <div id="tapAudio"><button class="primary" id="tapAudioBtn" style="font-size:24px;padding:24px 32px">🔊 Tap for sound</button></div>
+  </div>
+  <div class="meter" id="meter"><div></div></div>
+  <p class="hint">Keep this screen on to keep hearing them.</p>
+  <button id="parentStop">Stop</button>
+</section>
+
+<div id="dim"><span>Tap anywhere to wake screen</span></div>
+
+<script src="peerjs.min.js"></script>
+<script>
+(() => {
+  const PREFIX = 'sharka-babymon-';
+  const qs = new URLSearchParams(location.search);
+  // Optional self-hosted signaling server: ?server=host:port (used for testing).
+  const peerOpts = { debug: 1 };
+  if (qs.get('server')) {
+    const [host, port] = qs.get('server').split(':');
+    Object.assign(peerOpts, { host, port: Number(port) || 443, path: '/', secure: location.protocol === 'https:' });
+  }
+
+  const $ = id => document.getElementById(id);
+  const show = id => { document.querySelectorAll('.screen').forEach(s => s.classList.toggle('on', s.id === id)); };
+  const setStatus = (el, text, kind) => { el.textContent = text; el.className = 'status ' + (kind || ''); };
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+  };
+
+  // ---------- Screen wake lock ----------
+  let wakeLock = null, wantWake = false;
+  async function keepAwake(on) {
+    wantWake = on;
+    try {
+      if (on && 'wakeLock' in navigator && !wakeLock) {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLock.addEventListener('release', () => { wakeLock = null; });
+      } else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
+    } catch (e) { console.warn('wakeLock', e); }
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && wantWake) keepAwake(true);
+  });
+
+  // ---------- Baby (camera) ----------
+  let babyPeer = null, babyStream = null, facing = 'user', babyActive = false;
+  const calls = new Map(); // parent peer id -> MediaConnection
+  const conns = new Map(); // parent peer id -> DataConnection
+
+  function babyCode() {
+    let c = store.get('babymon-code');
+    if (!/^\d{4}$/.test(c || '')) { c = String(Math.floor(1000 + Math.random() * 9000)); store.set('babymon-code', c); }
+    return c;
+  }
+
+  async function startCamera() {
+    if (babyStream) babyStream.getTracks().forEach(t => t.stop());
+    babyStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: facing, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: true },
+    });
+    $('babyPreview').srcObject = babyStream;
+    // Swap tracks into live calls (camera flip) without reconnecting.
+    for (const call of calls.values()) {
+      const pc = call.peerConnection; if (!pc) continue;
+      for (const sender of pc.getSenders()) {
+        const t = babyStream.getTracks().find(t => sender.track && t.kind === sender.track.kind);
+        if (t) sender.replaceTrack(t).catch(() => {});
+      }
+    }
+  }
+
+  function updateBabyStatus() {
+    if (!babyActive) return;
+    const n = [...conns.values()].filter(c => c.open).length;
+    if (!babyPeer || babyPeer.disconnected) setStatus($('babyStatus'), 'Reconnecting to the internet…', 'warn');
+    else if (n === 0) setStatus($('babyStatus'), 'Ready. Waiting for a parent…', 'warn');
+    else setStatus($('babyStatus'), n === 1 ? '✓ 1 parent watching' : `✓ ${n} parents watching`, 'ok');
+  }
+
+  function dropParent(id) {
+    calls.get(id)?.close(); calls.delete(id);
+    conns.get(id)?.close(); conns.delete(id);
+    updateBabyStatus();
+  }
+
+  function createBabyPeer() {
+    if (!babyActive) return;
+    const code = babyCode();
+    $('babyCode').textContent = code;
+    const peer = new Peer(PREFIX + code, peerOpts);
+    babyPeer = peer;
+    peer.on('open', updateBabyStatus);
+    peer.on('connection', conn => {
+      conn.on('open', () => {
+        dropParent(conn.peer);
+        conns.set(conn.peer, conn);
+        const call = peer.call(conn.peer, babyStream);
+        calls.set(conn.peer, call);
+        call.on('close', () => { if (calls.get(conn.peer) === call) calls.delete(conn.peer); });
+        updateBabyStatus();
+      });
+      conn.on('data', d => { if (d === 'ping') conn.send('pong'); });
+      conn.on('close', () => { if (conns.get(conn.peer) === conn) dropParent(conn.peer); });
+      conn.on('error', () => {});
+    });
+    peer.on('disconnected', () => {
+      updateBabyStatus();
+      setTimeout(() => { if (babyPeer === peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 2000);
+    });
+    peer.on('error', err => {
+      console.warn('baby peer error', err.type, err);
+      if (err.type === 'peer-unavailable') return;
+      if (babyPeer !== peer) return;
+      // 'unavailable-id' happens right after a reload while the old session is still registered.
+      setStatus($('babyStatus'), err.type === 'unavailable-id' ? 'Getting ready…' : 'Connection problem, retrying…', 'warn');
+      if (['unavailable-id', 'network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
+        peer.destroy(); babyPeer = null;
+        setTimeout(createBabyPeer, 3000);
+      }
+    });
+  }
+
+  // Periodic health check: if the signaling connection silently died, rebuild it.
+  setInterval(() => {
+    if (!babyActive) return;
+    if (!babyPeer) return;
+    if (babyPeer.destroyed) { babyPeer = null; createBabyPeer(); }
+    else if (babyPeer.disconnected) babyPeer.reconnect();
+    updateBabyStatus();
+  }, 10000);
+
+  async function startBaby() {
+    show('baby');
+    babyActive = true;
+    keepAwake(true);
+    try { await startCamera(); }
+    catch (e) {
+      setStatus($('babyStatus'), 'Camera blocked. Allow camera & microphone in Safari, then reload.', 'bad');
+      return;
+    }
+    setStatus($('babyStatus'), 'Connecting…', 'warn');
+    createBabyPeer();
+  }
+
+  function stopBaby() {
+    babyActive = false;
+    for (const id of [...conns.keys()]) dropParent(id);
+    babyPeer?.destroy(); babyPeer = null;
+    babyStream?.getTracks().forEach(t => t.stop()); babyStream = null;
+    keepAwake(false);
+    show('home');
+  }
+
+  $('goBaby').onclick = () => { history.replaceState(null, '', '?mode=baby' + (qs.get('server') ? '&server=' + qs.get('server') : '')); startBaby(); };
+  $('babyStop').onclick = () => { history.replaceState(null, '', location.pathname + (qs.get('server') ? '?server=' + qs.get('server') : '')); stopBaby(); };
+  $('flipCam').onclick = async () => { facing = facing === 'user' ? 'environment' : 'user'; try { await startCamera(); } catch {} };
+  $('dimBtn').onclick = () => $('dim').classList.add('on');
+  $('dim').onclick = () => $('dim').classList.remove('on');
+
+  // ---------- Parent (viewer) ----------
+  let parentPeer = null, parentConn = null, parentCall = null, parentActive = false, parentCode = '';
+  let lastPong = 0, retryTimer = null, audioCtx = null, meterRaf = 0;
+
+  function scheduleRetry(delay = 3000) {
+    if (!parentActive) return;
+    clearTimeout(retryTimer);
+    retryTimer = setTimeout(connectToBaby, delay);
+  }
+
+  function ensureParentPeer() {
+    if (parentPeer && !parentPeer.destroyed) {
+      if (parentPeer.disconnected) parentPeer.reconnect();
+      return parentPeer;
+    }
+    const peer = new Peer(peerOpts);
+    parentPeer = peer;
+    peer.on('open', () => connectToBaby());
+    peer.on('call', call => {
+      parentCall?.close();
+      parentCall = call;
+      call.answer();
+      call.on('stream', stream => {
+        const v = $('remote');
+        if (v.srcObject !== stream) {
+          v.srcObject = stream;
+          playRemote();
+          startMeter(stream);
+        }
+        setStatus($('parentStatus'), '✓ Connected', 'ok');
+      });
+      call.on('close', () => { if (parentCall === call) { parentCall = null; lost(); } });
+      call.on('error', () => {});
+    });
+    peer.on('disconnected', () => setTimeout(() => { if (parentPeer === peer && !peer.destroyed && peer.disconnected) peer.reconnect(); }, 2000));
+    peer.on('error', err => {
+      console.warn('parent peer error', err.type, err);
+      if (err.type === 'peer-unavailable') {
+        setStatus($('parentStatus'), `Looking for baby device ${parentCode}…`, 'warn');
+        scheduleRetry(3000);
+      } else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
+        setStatus($('parentStatus'), 'Reconnecting…', 'warn');
+        peer.destroy(); if (parentPeer === peer) parentPeer = null;
+        scheduleRetry(3000);
+      }
+    });
+    return peer;
+  }
+
+  function connectToBaby() {
+    if (!parentActive) return;
+    const peer = ensureParentPeer();
+    if (!peer.open) return; // 'open' handler will call us
+    parentConn?.close();
+    const conn = peer.connect(PREFIX + parentCode, { reliable: true });
+    parentConn = conn;
+    lastPong = Date.now();
+    conn.on('open', () => { lastPong = Date.now(); setStatus($('parentStatus'), 'Starting video…', 'warn'); });
+    conn.on('data', d => { if (d === 'pong') lastPong = Date.now(); });
+    conn.on('close', () => { if (parentConn === conn) lost(); });
+    conn.on('error', () => {});
+  }
+
+  function lost() {
+    if (!parentActive) return;
+    setStatus($('parentStatus'), 'Connection lost, reconnecting…', 'bad');
+    scheduleRetry(2000);
+  }
+
+  // Heartbeat: ping the baby device; if it goes quiet, reconnect.
+  setInterval(() => {
+    if (!parentActive) return;
+    if (parentConn?.open) {
+      try { parentConn.send('ping'); } catch {}
+      if (Date.now() - lastPong > 15000) { parentConn.close(); parentCall?.close(); parentCall = null; lost(); }
+    } else if (Date.now() - lastPong > 15000) {
+      lastPong = Date.now();
+      scheduleRetry(0);
+    }
+  }, 5000);
+
+  async function playRemote() {
+    const v = $('remote');
+    v.muted = false;
+    try { await v.play(); $('tapAudio').classList.remove('on'); }
+    catch { $('tapAudio').classList.add('on'); }
+  }
+  $('tapAudioBtn').onclick = () => { audioCtx?.resume(); playRemote(); };
+
+  function startMeter(stream) {
+    cancelAnimationFrame(meterRaf);
+    try {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      audioCtx.resume();
+      const src = audioCtx.createMediaStreamSource(stream);
+      const an = audioCtx.createAnalyser(); an.fftSize = 512;
+      src.connect(an);
+      const buf = new Uint8Array(an.fftSize);
+      const bar = $('meter').firstElementChild;
+      const tick = () => {
+        an.getByteTimeDomainData(buf);
+        let sum = 0; for (const x of buf) { const d = (x - 128) / 128; sum += d * d; }
+        const level = Math.min(1, Math.sqrt(sum / buf.length) * 4);
+        bar.style.width = (level * 100).toFixed(0) + '%';
+        $('meter').classList.toggle('loud', level > 0.5);
+        meterRaf = requestAnimationFrame(tick);
+      };
+      tick();
+    } catch (e) { console.warn('meter', e); }
+  }
+
+  function startParent(code) {
+    parentCode = code;
+    store.set('babymon-last', code);
+    show('parent');
+    parentActive = true;
+    keepAwake(true);
+    // Unlock audio during this tap so later reconnects can play sound.
+    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch {}
+    const v = $('remote'); v.muted = false; v.play().catch(() => {});
+    setStatus($('parentStatus'), `Looking for baby device ${code}…`, 'warn');
+    connectToBaby();
+  }
+
+  function stopParent() {
+    parentActive = false;
+    clearTimeout(retryTimer);
+    cancelAnimationFrame(meterRaf);
+    parentCall?.close(); parentConn?.close(); parentPeer?.destroy();
+    parentCall = parentConn = parentPeer = null;
+    $('remote').srcObject = null;
+    keepAwake(false);
+    show('home');
+  }
+
+  $('goParent').onclick = () => { $('codeIn').value = store.get('babymon-last') || ''; show('parentJoin'); $('codeIn').focus(); };
+  $('parentBack').onclick = () => show('home');
+  $('watchBtn').onclick = () => {
+    const code = $('codeIn').value.replace(/\D/g, '');
+    if (code.length !== 4) { $('codeIn').focus(); return; }
+    startParent(code);
+  };
+  $('codeIn').addEventListener('keydown', e => { if (e.key === 'Enter') $('watchBtn').click(); });
+  $('parentStop').onclick = stopParent;
+
+  // Reloading the baby device goes straight back to camera mode.
+  if (qs.get('mode') === 'baby') {
+    $('babyCode').textContent = babyCode();
+    startBaby();
+  }
+})();
+</script>
+</body>
+</html>
