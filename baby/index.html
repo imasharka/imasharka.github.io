@@ -78,10 +78,11 @@
 <section id="parent" class="screen">
   <div class="status warn" id="parentStatus">Connecting…</div>
   <div class="viewer-wrap">
-    <video id="remote" autoplay playsinline></video>
+    <video id="remote" autoplay playsinline muted></video>
     <div id="tapAudio"><button class="primary" id="tapAudioBtn" style="font-size:24px;padding:24px 32px">🔊 Tap for sound</button></div>
   </div>
   <div class="meter" id="meter"><div></div></div>
+  <p class="hint" id="rxInfo"></p>
   <p class="hint">Keep this screen on to keep hearing them.</p>
   <button id="parentStop">Stop</button>
 </section>
@@ -241,7 +242,7 @@
 
   // ---------- Parent (viewer) ----------
   let parentPeer = null, parentConn = null, parentCall = null, parentActive = false, parentCode = '';
-  let lastPong = 0, retryTimer = null, audioCtx = null, meterRaf = 0;
+  let lastPong = 0, retryTimer = null, statsTimer = 0;
 
   function scheduleRetry(delay = 3000) {
     if (!parentActive) return;
@@ -261,12 +262,21 @@
       parentCall?.close();
       parentCall = call;
       call.answer();
+      const pc = call.peerConnection;
+      pc?.addEventListener('iceconnectionstatechange', () => {
+        console.log('ice', pc.iceConnectionState);
+        if (parentCall !== call) return;
+        if (pc.iceConnectionState === 'failed') {
+          setStatus($('parentStatus'), 'Can\'t reach the iPad, retrying…', 'bad');
+          call.close();
+        }
+      });
       call.on('stream', stream => {
         const v = $('remote');
         if (v.srcObject !== stream) {
           v.srcObject = stream;
           playRemote();
-          startMeter(stream);
+          startStats(call);
         }
         setStatus($('parentStatus'), '✓ Connected', 'ok');
       });
@@ -320,34 +330,50 @@
     }
   }, 5000);
 
+  // iPhone Safari only autoplays muted video, so start muted (picture always shows),
+  // then try to unmute; if Safari refuses, show a "Tap for sound" button.
   async function playRemote() {
     const v = $('remote');
+    v.muted = true;
+    try { await v.play(); } catch (e) { console.warn('muted play', e); }
     v.muted = false;
-    try { await v.play(); $('tapAudio').classList.remove('on'); }
-    catch { $('tapAudio').classList.add('on'); }
+    try { await v.play(); }
+    catch { v.muted = true; v.play().catch(() => {}); }
+    $('tapAudio').classList.toggle('on', v.muted || v.paused);
   }
-  $('tapAudioBtn').onclick = () => { audioCtx?.resume(); playRemote(); };
+  $('tapAudioBtn').onclick = () => {
+    const v = $('remote');
+    v.muted = false;
+    v.play().then(() => $('tapAudio').classList.remove('on')).catch(e => console.warn('tap play', e));
+  };
 
-  function startMeter(stream) {
-    cancelAnimationFrame(meterRaf);
-    try {
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-      audioCtx.resume();
-      const src = audioCtx.createMediaStreamSource(stream);
-      const an = audioCtx.createAnalyser(); an.fftSize = 512;
-      src.connect(an);
-      const buf = new Uint8Array(an.fftSize);
-      const bar = $('meter').firstElementChild;
-      const tick = () => {
-        an.getByteTimeDomainData(buf);
-        let sum = 0; for (const x of buf) { const d = (x - 128) / 128; sum += d * d; }
-        const level = Math.min(1, Math.sqrt(sum / buf.length) * 4);
-        bar.style.width = (level * 100).toFixed(0) + '%';
-        $('meter').classList.toggle('loud', level > 0.5);
-        meterRaf = requestAnimationFrame(tick);
-      };
-      tick();
-    } catch (e) { console.warn('meter', e); }
+  // Show what is actually arriving (from WebRTC stats) and a sound-level bar.
+  function startStats(call) {
+    clearInterval(statsTimer);
+    const prev = {};
+    statsTimer = setInterval(async () => {
+      const pc = call.peerConnection;
+      if (!pc || parentCall !== call) return;
+      let vBytes = 0, aBytes = 0, level = null;
+      try {
+        (await pc.getStats()).forEach(r => {
+          if (r.type !== 'inbound-rtp') return;
+          const kind = r.kind || r.mediaType;
+          if (kind === 'video') vBytes += r.bytesReceived || 0;
+          if (kind === 'audio') { aBytes += r.bytesReceived || 0; if (typeof r.audioLevel === 'number') level = r.audioLevel; }
+        });
+      } catch { return; }
+      const vOk = vBytes > (prev.v || 0), aOk = aBytes > (prev.a || 0);
+      prev.v = vBytes; prev.a = aBytes;
+      const v = $('remote');
+      $('rxInfo').textContent = `Picture ${vOk ? '✓' : '✗'} ${v.videoWidth ? v.videoWidth + '×' + v.videoHeight : ''} · Sound ${aOk ? '✓' : '✗'}${v.muted ? ' (muted, tap button)' : ''}`;
+      if (level !== null) {
+        const l = Math.min(1, level * 3);
+        $('meter').firstElementChild.style.width = (l * 100).toFixed(0) + '%';
+        $('meter').classList.toggle('loud', l > 0.5);
+      }
+      if (v.paused && v.srcObject) v.play().catch(() => {});
+    }, 1000);
   }
 
   function startParent(code) {
@@ -357,8 +383,7 @@
     parentActive = true;
     keepAwake(true);
     // Unlock audio during this tap so later reconnects can play sound.
-    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); audioCtx.resume(); } catch {}
-    const v = $('remote'); v.muted = false; v.play().catch(() => {});
+    const v = $('remote'); v.play().catch(() => {});
     setStatus($('parentStatus'), `Looking for baby device ${code}…`, 'warn');
     connectToBaby();
   }
@@ -366,7 +391,7 @@
   function stopParent() {
     parentActive = false;
     clearTimeout(retryTimer);
-    cancelAnimationFrame(meterRaf);
+    clearInterval(statsTimer);
     parentCall?.close(); parentConn?.close(); parentPeer?.destroy();
     parentCall = parentConn = parentPeer = null;
     $('remote').srcObject = null;
