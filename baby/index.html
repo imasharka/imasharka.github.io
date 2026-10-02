@@ -94,13 +94,21 @@
 <script src="peerjs.min.js"></script>
 <script>
 (() => {
-  const VERSION = 'v4';
+  const VERSION = 'v5';
   const PREFIX = 'sharka-babymon-';
   let lastErr = '';
   const noteErr = e => { lastErr = (e && (e.type || e.name)) || String(e); };
   const qs = new URLSearchParams(location.search);
   // Optional self-hosted signaling server: ?server=host:port (used for testing).
-  const peerOpts = { debug: 1 };
+  // Extra relay servers so it still works on Wi-Fi that blocks devices from
+  // reaching each other directly (guest / mesh networks). Tries UDP, then TCP/TLS on 443.
+  const peerOpts = { debug: 1, config: { iceServers: [
+    { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
+    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
+    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp', 'turns:openrelay.metered.ca:443'],
+      username: 'openrelayproject', credential: 'openrelayproject' },
+  ], sdpSemantics: 'unified-plan' } };
+  let lastIce = '';
   if (qs.get('server')) {
     const [host, port] = qs.get('server').split(':');
     Object.assign(peerOpts, { host, port: Number(port) || 443, path: '/', secure: location.protocol === 'https:' });
@@ -323,6 +331,12 @@
     parentConn = conn;
     lastPong = Date.now();
     conn.on('open', () => { lastPong = Date.now(); setStatus($('parentStatus'), 'Starting video…', 'warn'); });
+    setTimeout(() => {
+      const pc = conn.peerConnection;
+      if (!pc) return;
+      lastIce = pc.iceConnectionState;
+      pc.addEventListener('iceconnectionstatechange', () => { if (parentConn === conn) lastIce = pc.iceConnectionState; });
+    }, 0);
     conn.on('data', d => { if (d === 'pong') lastPong = Date.now(); });
     conn.on('close', () => { if (parentConn === conn) lost(); });
     conn.on('error', () => {});
@@ -429,7 +443,7 @@
   setInterval(() => {
     const p = babyActive ? babyPeer : parentActive ? parentPeer : null;
     const st = !p ? 'not started' : p.destroyed ? 'restarting' : p.disconnected ? 'offline' : p.open ? 'online' : 'connecting';
-    $('diag').textContent = (babyActive || parentActive) ? `${VERSION} · server ${st}${lastErr ? ' · last error: ' + lastErr : ''}` : VERSION;
+    $('diag').textContent = (babyActive || parentActive) ? `${VERSION} · server ${st}${parentActive && lastIce ? ' · link ' + lastIce : ''}${lastErr ? ' · last error: ' + lastErr : ''}` : VERSION;
   }, 1000);
 
   // Reloading the baby device goes straight back to camera mode.
