@@ -58,6 +58,7 @@
   <p class="hint">On the parent phone, open this page, tap <b>Parent</b>, enter:</p>
   <div class="code" id="babyCode">----</div>
   <div class="status warn" id="babyStatus">Starting camera…</div>
+  <p class="hint" id="awakeWarn" style="display:none;color:var(--warn)">⚠️ Keep this screen on: Settings › Display &amp; Brightness › Auto-Lock › Never, and keep this page open in front.</p>
   <video id="babyPreview" autoplay playsinline muted></video>
   <div class="row">
     <button id="flipCam">🔄 Flip camera</button>
@@ -119,9 +120,12 @@
         wakeLock.addEventListener('release', () => { wakeLock = null; });
       } else if (!on && wakeLock) { await wakeLock.release(); wakeLock = null; }
     } catch (e) { console.warn('wakeLock', e); }
+    $('awakeWarn').style.display = (on && !wakeLock && babyActive) ? '' : 'none';
   }
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible' && wantWake) keepAwake(true);
+    if (document.visibilityState !== 'visible') return;
+    if (wantWake) keepAwake(true);
+    if (babyActive) reviveBaby();
   });
 
   // ---------- Baby (camera) ----------
@@ -166,8 +170,20 @@
     updateBabyStatus();
   }
 
-  function createBabyPeer() {
+  // iOS stops the camera and network when the iPad locks or Safari goes to the
+  // background. When the page is back in front, bring both back.
+  async function reviveBaby() {
     if (!babyActive) return;
+    const dead = !babyStream || babyStream.getTracks().some(t => t.readyState === 'ended');
+    if (dead) { try { await startCamera(); } catch (e) { console.warn('camera restart', e); } }
+    if (!babyPeer || babyPeer.destroyed) { babyPeer = null; createBabyPeer(); }
+    else if (babyPeer.disconnected) babyPeer.reconnect();
+    if (dead) for (const id of [...conns.keys()]) dropParent(id); // parents reconnect and get the new camera
+    updateBabyStatus();
+  }
+
+  function createBabyPeer() {
+    if (!babyActive || (babyPeer && !babyPeer.destroyed)) return;
     const code = babyCode();
     $('babyCode').textContent = code;
     const peer = new Peer(PREFIX + code, peerOpts);
@@ -205,11 +221,7 @@
 
   // Periodic health check: if the signaling connection silently died, rebuild it.
   setInterval(() => {
-    if (!babyActive) return;
-    if (!babyPeer) return;
-    if (babyPeer.destroyed) { babyPeer = null; createBabyPeer(); }
-    else if (babyPeer.disconnected) babyPeer.reconnect();
-    updateBabyStatus();
+    if (babyActive && babyPeer) reviveBaby();
   }, 10000);
 
   async function startBaby() {
@@ -287,7 +299,7 @@
     peer.on('error', err => {
       console.warn('parent peer error', err.type, err);
       if (err.type === 'peer-unavailable') {
-        setStatus($('parentStatus'), `Looking for baby device ${parentCode}…`, 'warn');
+        setStatus($('parentStatus'), `Can't find the iPad (${parentCode}). Is its screen on, in Baby mode?`, 'bad');
         scheduleRetry(3000);
       } else if (['network', 'server-error', 'socket-error', 'socket-closed'].includes(err.type)) {
         setStatus($('parentStatus'), 'Reconnecting…', 'warn');
