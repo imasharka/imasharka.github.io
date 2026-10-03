@@ -94,7 +94,7 @@
 <script src="peerjs.min.js"></script>
 <script>
 (() => {
-  const VERSION = 'v5';
+  const VERSION = 'v6';
   const PREFIX = 'sharka-babymon-';
   let lastErr = '';
   const noteErr = e => { lastErr = (e && (e.type || e.name)) || String(e); };
@@ -104,10 +104,28 @@
   // reaching each other directly (guest / mesh networks). Tries UDP, then TCP/TLS on 443.
   const peerOpts = { debug: 1, config: { iceServers: [
     { urls: ['stun:stun.l.google.com:19302', 'stun:stun.cloudflare.com:3478'] },
-    { urls: ['turn:eu-0.turn.peerjs.com:3478', 'turn:us-0.turn.peerjs.com:3478'], username: 'peerjs', credential: 'peerjsp' },
-    { urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp', 'turns:openrelay.metered.ca:443'],
-      username: 'openrelayproject', credential: 'openrelayproject' },
   ], sdpSemantics: 'unified-plan' } };
+
+  // Our own relay on the Seoul server. The server hands out short-lived logins
+  // (coturn use-auth-secret), so no password lives in this page.
+  const RELAY_CREDS_URL = 'https://sharkasystems.com/babymon/turn-credentials';
+  let relayOk = false;
+  async function loadRelay() {
+    try {
+      const ctl = new AbortController(); const t = setTimeout(() => ctl.abort(), 5000);
+      const r = await fetch(RELAY_CREDS_URL, { cache: 'no-store', signal: ctl.signal });
+      clearTimeout(t);
+      if (!r.ok) throw new Error('relay ' + r.status);
+      const { username, credential, urls, ttl } = await r.json();
+      const list = peerOpts.config.iceServers;
+      const i = list.findIndex(x => x.username);
+      const entry = { urls, username, credential };
+      if (i >= 0) list[i] = entry; else list.push(entry);
+      relayOk = true;
+      setTimeout(loadRelay, Math.max(60, (ttl || 3600) / 2) * 1000);
+    } catch (e) { console.warn('relay creds', e); relayOk = false; setTimeout(loadRelay, 30000); }
+  }
+  const relayReady = Promise.race([loadRelay(), new Promise(r => setTimeout(r, 5000))]);
   let lastIce = '';
   if (qs.get('server')) {
     const [host, port] = qs.get('server').split(':');
@@ -238,6 +256,7 @@
 
   async function startBaby() {
     show('baby');
+    await relayReady;
     babyActive = true;
     keepAwake(true);
     try { await startCamera(); }
@@ -407,7 +426,7 @@
     }, 1000);
   }
 
-  function startParent(code) {
+  async function startParent(code) {
     parentCode = code;
     store.set('babymon-last', code);
     show('parent');
@@ -416,6 +435,7 @@
     // Unlock audio during this tap so later reconnects can play sound.
     const v = $('remote'); v.play().catch(() => {});
     setStatus($('parentStatus'), `Looking for baby device ${code}…`, 'warn');
+    await relayReady;
     connectToBaby();
   }
 
@@ -443,7 +463,7 @@
   setInterval(() => {
     const p = babyActive ? babyPeer : parentActive ? parentPeer : null;
     const st = !p ? 'not started' : p.destroyed ? 'restarting' : p.disconnected ? 'offline' : p.open ? 'online' : 'connecting';
-    $('diag').textContent = (babyActive || parentActive) ? `${VERSION} · server ${st}${parentActive && lastIce ? ' · link ' + lastIce : ''}${lastErr ? ' · last error: ' + lastErr : ''}` : VERSION;
+    $('diag').textContent = (babyActive || parentActive) ? `${VERSION} · server ${st} · relay ${relayOk ? 'ready' : 'off'}${parentActive && lastIce ? ' · link ' + lastIce : ''}${lastErr ? ' · last error: ' + lastErr : ''}` : VERSION;
   }, 1000);
 
   // Reloading the baby device goes straight back to camera mode.
